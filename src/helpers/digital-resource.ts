@@ -6,15 +6,68 @@ import { validHttpsResourceUrl } from '@/helpers/resource-url';
 
 const DOCUMENT_EXTENSIONS = new Set(['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'pdf']);
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
-const FILE_EXTENSION_PATTERN = /\.([a-z0-9]+)(?:[?#].*)?$/i;
+const ARCHIVE_EXTENSIONS = new Set(['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz']);
+const WEB_PAGE_EXTENSIONS = new Set([
+  'html',
+  'htm',
+  'xhtml',
+  'shtml',
+  'php',
+  'asp',
+  'aspx',
+  'jsp',
+  'cgi',
+  'cfm',
+  'do',
+  'action',
+]);
+const FILE_EXTENSION_PATTERN = /\.([a-z0-9]+)$/i;
+const RESOURCE_URL_PATH_PATTERN = /^https:\/\/[^/?#]+([^?#]*)/i;
+const FILE_NAME_PATH_SEPARATOR_PATTERN = /[/\\]/g;
 const TRAILING_SLASH_PATTERN = /\/$/;
 
+function fileExtension(fileName?: string) {
+  return FILE_EXTENSION_PATTERN.exec(fileName?.trim() ?? '')?.[1]?.toLowerCase() ?? '';
+}
+
+function resourceUrlFileName(url?: string) {
+  const path = RESOURCE_URL_PATH_PATTERN.exec(url?.trim() ?? '')?.[1] ?? '';
+  const fileName = path.slice(path.lastIndexOf('/') + 1);
+  try {
+    return decodeURIComponent(fileName).replace(FILE_NAME_PATH_SEPARATOR_PATTERN, '_');
+  } catch {
+    return fileName;
+  }
+}
+
 function resourceExtension(resource: CustomerDigitalResourceUcResponse) {
-  return (
-    FILE_EXTENSION_PATTERN.exec(resource.resourceName ?? '')?.[1]?.toLowerCase() ??
-    FILE_EXTENSION_PATTERN.exec(resource.resourceUrl ?? '')?.[1]?.toLowerCase() ??
-    ''
-  );
+  const nameExtension = fileExtension(resource.resourceName);
+  if (resource.resourceType !== 'STATIC_URL') {
+    return nameExtension;
+  }
+  const urlExtension = fileExtension(resourceUrlFileName(resource.resourceUrl));
+  if (urlExtension) {
+    return urlExtension;
+  }
+  // Opaque download URLs can still use a recognizable file name, but display
+  // names such as "Manual v1.0" must not turn a web page into a file download.
+  return DOCUMENT_EXTENSIONS.has(nameExtension) ||
+    IMAGE_EXTENSIONS.has(nameExtension) ||
+    ARCHIVE_EXTENSIONS.has(nameExtension)
+    ? nameExtension
+    : '';
+}
+
+function resourceFileName(resource: CustomerDigitalResourceUcResponse, extension: string) {
+  const name = resource.resourceName?.trim();
+  if (name && fileExtension(name) === extension) {
+    return name;
+  }
+  const urlFileName = resourceUrlFileName(resource.resourceUrl);
+  if (urlFileName && fileExtension(urlFileName) === extension) {
+    return urlFileName;
+  }
+  return name;
 }
 
 function staticResourceUrl(resource: CustomerDigitalResourceUcResponse) {
@@ -99,6 +152,20 @@ function shareFile(filePath: string, fileName?: string) {
   });
 }
 
+function openDownloadedFile(
+  filePath: string,
+  extension: string,
+  resource: CustomerDigitalResourceUcResponse,
+) {
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    return previewImage(filePath);
+  }
+  if (DOCUMENT_EXTENSIONS.has(extension)) {
+    return openDocument(filePath, extension);
+  }
+  return shareFile(filePath, resourceFileName(resource, extension));
+}
+
 /** Validate purchase through Pro before downloading the temporary file. */
 export async function openPurchasedDigitalResource(resource: CustomerDigitalResourceUcResponse) {
   if (import.meta.env.VITE_MOCK_ENABLED === 'true' && resource.resourceType !== 'STATIC_URL') {
@@ -107,23 +174,15 @@ export async function openPurchasedDigitalResource(resource: CustomerDigitalReso
   if (resource.resourceType === 'STATIC_URL') {
     const url = staticResourceUrl(resource);
     const extension = resourceExtension(resource);
-    if (!DOCUMENT_EXTENSIONS.has(extension) && !IMAGE_EXTENSIONS.has(extension)) {
+    if (!extension || WEB_PAGE_EXTENSIONS.has(extension)) {
       await openWebResource(url, resource.resourceName ?? '');
       return;
     }
-    try {
-      const response = await downloadPublicFile(url);
-      if (response.statusCode !== 200 || !response.tempFilePath) {
-        throw new Error(`Digital resource download failed: ${response.statusCode}`);
-      }
-      if (IMAGE_EXTENSIONS.has(extension)) {
-        await previewImage(response.tempFilePath);
-      } else {
-        await openDocument(response.tempFilePath, extension);
-      }
-    } catch {
-      await openWebResource(url, resource.resourceName ?? '');
+    const response = await downloadPublicFile(url);
+    if (response.statusCode !== 200 || !response.tempFilePath) {
+      throw new Error(`Digital resource download failed: ${response.statusCode}`);
     }
+    await openDownloadedFile(response.tempFilePath, extension, resource);
     return;
   }
 
@@ -142,12 +201,5 @@ export async function openPurchasedDigitalResource(resource: CustomerDigitalReso
     throw new Error(`Digital resource download failed: ${response.statusCode}`);
   }
 
-  const extension = resourceExtension(resource);
-  if (IMAGE_EXTENSIONS.has(extension)) {
-    await previewImage(response.tempFilePath);
-  } else if (DOCUMENT_EXTENSIONS.has(extension)) {
-    await openDocument(response.tempFilePath, extension);
-  } else {
-    await shareFile(response.tempFilePath, resource.resourceName);
-  }
+  await openDownloadedFile(response.tempFilePath, resourceExtension(resource), resource);
 }

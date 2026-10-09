@@ -38,6 +38,7 @@
     "build:quickapp-webview-union": "uni build -p quickapp-webview-union --mode production",
     "type-check": "vue-tsc --noEmit",
     "test:virtual-mock": "node scripts/test-virtual-mock.mjs",
+    "test:digital-resource": "node scripts/test-digital-resource.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "eslint . --fix; prettier --write .",
