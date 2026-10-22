@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import { onLoad } from '@dcloudio/uni-app';
+import { onHide, onLoad, onShow, onUnload } from '@dcloudio/uni-app';
 import { useI18n } from 'vue-i18n';
 import TIcon from '@tdesign/uniapp/icon/icon.vue';
 import AppLoadError from '@/components/common/AppLoadError.vue';
@@ -8,7 +8,9 @@ import { orderApi } from '@/api/modules/order';
 import { guardCurrentPageAccess } from '@/helpers/auth';
 import { ICON_COLOR } from '@/helpers/icon';
 import { useCart } from '@/hooks/useCart';
-import { sendRequest, useAsyncQuery } from '@/hooks/useRequest';
+import { sendRequest } from '@/hooks/useRequest';
+import { useOrderDetailPage } from '@/hooks/useOrderDetailPage';
+import { useUserStore } from '@/store';
 import { formatCurrency, maskPhone, joinName, formatDate } from '@/utils/format';
 import {
   getOrderStatusInfo,
@@ -19,54 +21,58 @@ import {
   getSpecText,
   requiresShipping,
 } from '@/helpers/order';
-import type { OrderResponse, OrderItemResponse, FulfillmentUcResponse } from '@halo-dev/api-client';
+import type { OrderItemResponse, FulfillmentUcResponse } from '@halo-dev/api-client';
 import { formatImageUrlWithThumbnail } from '@/helpers/image';
 import { findShippingLabel } from '@/helpers/fulfillment';
 
-const orderCode = ref('');
 const { t } = useI18n();
+const userStore = useUserStore();
 const {
+  orderCode,
   data: detailData,
   loading,
   error: loadErrorRaw,
-  run: runOrderDetail,
-} = useAsyncQuery<
-  { orderData: OrderResponse; fulfillData: FulfillmentUcResponse[] },
-  { orderCode: string }
->(
-  async (params) => {
+  confirming,
+  setOrderCode,
+  show,
+  hide,
+  load: retryLoadData,
+  confirmReceive: onConfirmReceive,
+  dispose,
+} = useOrderDetailPage({
+  getAccountKey: () => (userStore.isLoggedIn ? (userStore.profile?.metadata.name ?? null) : null),
+  guardAccess: guardCurrentPageAccess,
+  request: async (code) => {
     const [orderData, fulfillData] = await Promise.all([
-      sendRequest(orderApi.getOrder(params.orderCode)),
-      sendRequest(orderApi.getOrderFulfillments(params.orderCode)).catch(() => []),
+      sendRequest(orderApi.getOrder(code)),
+      sendRequest(orderApi.getOrderFulfillments(code)).catch(() => []),
     ]);
     return { orderData, fulfillData: fulfillData as FulfillmentUcResponse[] };
   },
-  { immediate: false },
-);
+  canConfirm: canConfirmReceive,
+  confirm: () =>
+    new Promise((resolve) => {
+      uni.showModal({
+        title: t('order.confirmReceiveTitle'),
+        content: t('order.confirmReceiveContent'),
+        success: (result) => resolve(!!result.confirm),
+        fail: () => resolve(false),
+      });
+    }),
+  markAsReceived: (code) => sendRequest(orderApi.markAsReceived(code)),
+  onConfirmed: () => uni.showToast({ title: t('order.confirmReceiveSuccess'), icon: 'success' }),
+  onConfirmFailed: () => uni.showToast({ title: t('order.actionFailed'), icon: 'none' }),
+});
 const order = computed(() => detailData.value?.orderData ?? null);
 const fulfillments = computed(() => detailData.value?.fulfillData ?? []);
 const loadError = computed(() => !!loadErrorRaw.value);
 
-onLoad(async (options) => {
-  if (!guardCurrentPageAccess()) {
-    return;
-  }
-  if (options?.orderCode) {
-    orderCode.value = options.orderCode;
-    try {
-      await runOrderDetail({ orderCode: orderCode.value });
-    } catch {
-      // ignore
-    }
-  }
+onLoad((options) => {
+  setOrderCode(options?.orderCode ?? '');
 });
-
-function retryLoadData() {
-  if (!orderCode.value) {
-    return;
-  }
-  runOrderDetail({ orderCode: orderCode.value });
-}
+onShow(show);
+onHide(hide);
+onUnload(dispose);
 
 const statusInfo = computed(() => {
   const orderRaw = order.value;
@@ -145,24 +151,6 @@ const showBuyAgain = computed(() => !!order.value && canBuyAgain(order.value));
 
 function onPayNow() {
   uni.navigateTo({ url: `/subpkg-trade/payment/index?orderCode=${orderCode.value}` });
-}
-
-async function onConfirmReceive() {
-  uni.showModal({
-    title: t('order.confirmReceiveTitle'),
-    content: t('order.confirmReceiveContent'),
-    success: async (res) => {
-      if (res.confirm) {
-        try {
-          await sendRequest(orderApi.markAsReceived(orderCode.value));
-          uni.showToast({ title: t('order.confirmReceiveSuccess'), icon: 'success' });
-          await runOrderDetail({ orderCode: orderCode.value });
-        } catch {
-          uni.showToast({ title: t('order.actionFailed'), icon: 'none' });
-        }
-      }
-    },
-  });
 }
 
 function onViewLogistics() {
@@ -479,6 +467,7 @@ function onCopyOrderCode() {
     <view
       v-if="showConfirmReceive"
       class="px-6 py-2.5 rounded-1.5 bg-brand shadow-brand-btn"
+      :class="{ 'opacity-60': confirming }"
       @tap="onConfirmReceive"
     >
       <text class="text-sm text-white font-medium">{{ $t('order.confirmReceive') }}</text>
