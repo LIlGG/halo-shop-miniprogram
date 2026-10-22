@@ -3,12 +3,14 @@ import { useI18n } from 'vue-i18n';
 import type { ContactInformation } from '@halo-dev/api-client';
 import { shopApi } from '@/api/modules/shop';
 import { sendRequest } from '@/hooks/useRequest';
-import { resolveInquiryAction } from '@/helpers/inquiry';
+import { resolveInquiryAction, resolveInquiryTarget } from '@/helpers/inquiry';
+import { useAppConfig } from '@/config';
 import { openLinkTarget } from '@/helpers/link';
 import { formatImageUrl } from '@/helpers/image';
 
 export function useProductInquiry() {
   const { t } = useI18n();
+  const { halo } = useAppConfig();
   const visible = shallowRef(false);
   const loading = shallowRef(false);
   const error = shallowRef<'loadFailed' | 'unavailable' | 'openFailed' | null>(null);
@@ -43,8 +45,15 @@ export function useProductInquiry() {
       }
     };
     try {
+      const resolvedTarget = resolveInquiryTarget(target, halo.baseURL);
+      if (!resolvedTarget) {
+        onError();
+        return;
+      }
       visible.value = false;
-      if (!openLinkTarget(target, { copyMessage: t('product.inquiryLinkCopied'), onError })) {
+      if (
+        !openLinkTarget(resolvedTarget, { copyMessage: t('product.inquiryLinkCopied'), onError })
+      ) {
         onError();
       }
     } catch {

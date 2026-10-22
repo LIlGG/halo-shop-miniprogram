@@ -57,6 +57,7 @@ const fixedVariant = {
 function inquiryHarness({
   getConfig = async () => ({ contacts: [contact] }),
   open = () => true,
+  baseURL = 'https://shop.test',
 } = {}) {
   const calls = { requests: 0, links: [], previews: [] };
   const scope = vue.effectScope();
@@ -64,6 +65,7 @@ function inquiryHarness({
     read('../src/composables/useProductInquiry.ts'),
     {
       vue,
+      '@/config': { useAppConfig: () => ({ halo: { baseURL } }) },
       'vue-i18n': { useI18n: () => ({ t: (key) => key }) },
       '@/api/modules/shop': {
         shopApi: {
@@ -370,5 +372,62 @@ test('synchronous clipboard failure remains visible, and late preview failures d
   h.inquiry.close();
   previewFailed();
   assert.equal(h.inquiry.visible.value, false);
+  h.dispose();
+});
+
+test('inquiry web targets resolve against Halo without a browser URL global or mini-program routes', () => {
+  for (const [target, base, expected] of [
+    ['/contact', 'https://shop.test', 'https://shop.test/contact'],
+    ['/pages/contact/index', 'https://shop.test/base/', 'https://shop.test/pages/contact/index'],
+    ['contact', 'https://shop.test/base/', 'https://shop.test/base/contact'],
+    [
+      '../contact?sku=1#sales',
+      'https://shop.test/base/shop/',
+      'https://shop.test/base/contact?sku=1#sales',
+    ],
+    ['../../../../contact', 'https://shop.test/base/', 'https://shop.test/contact'],
+    ['//sales.test/contact', 'https://shop.test', 'https://sales.test/contact'],
+    ['//sales.test/contact', 'http://localhost:8090/base/', 'http://sales.test/contact'],
+    ['?sku=1#sales', 'https://shop.test/base/?old=1', 'https://shop.test/base/?sku=1#sales'],
+    ['#sales', 'https://shop.test/base/?sku=1', 'https://shop.test/base/?sku=1#sales'],
+    ['https://sales.test/contact', 'invalid', 'https://sales.test/contact'],
+    ['tel:123', 'https://shop.test', 'tel:123'],
+  ]) {
+    assert.equal(helpers.resolveInquiryTarget(target, base), expected);
+  }
+  assert.equal(helpers.resolveInquiryTarget('/contact', 'invalid'), null);
+  assert.equal(helpers.resolveInquiryTarget('//', 'https://shop.test'), null);
+});
+
+test('redirect, contact links and image links all use the resolved web URL', async () => {
+  const h = inquiryHarness({
+    getConfig: async () => ({ inquiryRedirectUrl: '/contact' }),
+    baseURL: 'https://shop.test/base/',
+  });
+  await h.inquiry.inquire();
+  assert.equal(h.calls.links[0].target, 'https://shop.test/contact');
+  h.inquiry.openContact({ type: 'LINK', label: 'Sales', linkUrl: '/pages/contact/index' });
+  assert.equal(h.calls.links[1].target, 'https://shop.test/pages/contact/index');
+  h.inquiry.openContact({
+    type: 'IMAGE',
+    label: 'QR',
+    image: '/qr.png',
+    imageHref: '//sales.test/contact',
+  });
+  assert.equal(h.calls.links[2].target, 'https://sales.test/contact');
+  h.dispose();
+});
+
+test('an invalid Halo base leaves relative inquiry links in an explicit retryable error state', async () => {
+  const h = inquiryHarness({
+    getConfig: async () => ({ inquiryRedirectUrl: '/contact', contacts: [contact] }),
+    baseURL: 'invalid',
+  });
+  await h.inquiry.inquire();
+  assert.equal(h.calls.links.length, 0);
+  assert.equal(h.inquiry.error.value, 'openFailed');
+  assert.equal(h.inquiry.visible.value, true);
+  assert.equal(h.inquiry.contacts.value.length, 0);
+  assert.equal(h.inquiry.loading.value, false);
   h.dispose();
 });
