@@ -75,9 +75,7 @@ const selectedVariant = computed<ProductVariantResponse | null>(() => {
       return v.specValues.every((sv) => {
         return selectedSpecs.value[sv.name ?? ''] === sv.value;
       });
-    }) ??
-    variants[0] ??
-    null
+    }) ?? null
   );
 });
 
@@ -237,7 +235,9 @@ const quantityLimit = computed(() => getQuantityLimit(selectedVariant.value));
 watch(
   quantityLimit,
   (maximum) => {
-    quantity.value = clampQuantity(quantity.value, maximum);
+    if (selectedVariant.value) {
+      quantity.value = clampQuantity(quantity.value, maximum);
+    }
   },
   { flush: 'sync' },
 );
@@ -481,14 +481,14 @@ function onBannerChange(e: { detail: { current: number } }) {
       <view class="flex gap-3">
         <view
           class="flex flex-1 items-center justify-center py-3.5 border border-solid border-brand rounded-full"
-          :class="addingToCart || quantityLimit < 1 ? 'opacity-60' : ''"
+          :class="addingToCart || !selectedVariant || quantityLimit < 1 ? 'opacity-60' : ''"
           @tap="handleAddToCart"
         >
           <text class="text-brand text-base font-bold">{{ $t('product.addToCart') }}</text>
         </view>
         <view
           class="flex flex-1 items-center justify-center py-3.5 bg-brand rounded-full"
-          :class="quantityLimit < 1 ? 'opacity-60' : ''"
+          :class="!selectedVariant || quantityLimit < 1 ? 'opacity-60' : ''"
           @tap="handleBuyNow"
         >
           <text class="text-white text-base font-bold">{{ $t('product.buyNow') }}</text>

@@ -77,6 +77,10 @@ function selectSpec(specName: string, value: string) {
   if (isDisabled(specName, value)) {
     return;
   }
+  if (isSelected(specName, value)) {
+    emit('update:selectedSpecs', {});
+    return;
+  }
   emit('update:selectedSpecs', { ...props.selectedSpecs, [specName]: value });
 }
 

@@ -394,9 +394,7 @@ const skuSelectedVariant = computed(() => {
         return true;
       }
       return v.specValues.every((sv) => skuSelectedSpecs.value[sv.name ?? ''] === sv.value);
-    }) ??
-    variants[0] ??
-    null
+    }) ?? null
   );
 });
 
@@ -406,7 +404,9 @@ const skuQuantityLimit = computed(() =>
 watch(
   skuQuantityLimit,
   (maximum) => {
-    skuQuantity.value = clampQuantity(skuQuantity.value, maximum);
+    if (skuSelectedVariant.value) {
+      skuQuantity.value = clampQuantity(skuQuantity.value, maximum);
+    }
   },
   { flush: 'sync' },
 );
@@ -491,7 +491,11 @@ async function confirmSkuChange() {
 
   const newVariant = skuSelectedVariant.value;
   const newQty = skuQuantity.value;
-  if (!newVariant?.id || !isQuantityAllowed(newQty, skuQuantityLimit.value)) {
+  if (!newVariant?.id) {
+    uni.showToast({ title: t('sku.unavailable'), icon: 'none' });
+    return;
+  }
+  if (!isQuantityAllowed(newQty, skuQuantityLimit.value)) {
     showQuantityLimit(skuQuantityLimit.value);
     return;
   }
@@ -823,7 +827,7 @@ function goToProduct(product: ProductResponse | undefined) {
     >
       <view
         class="bg-brand rounded-full py-3.5 flex items-center justify-center"
-        :class="skuSubmitting || skuQuantityLimit < 1 ? 'opacity-60' : ''"
+        :class="skuSubmitting || !skuSelectedVariant || skuQuantityLimit < 1 ? 'opacity-60' : ''"
         @tap="confirmSkuChange"
       >
         <text class="text-white text-base font-bold">{{
