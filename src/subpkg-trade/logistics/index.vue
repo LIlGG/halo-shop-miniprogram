@@ -21,7 +21,7 @@ const orderCode = shallowRef('');
 const { data: records, loading, error, run } = useShippingRecords();
 
 async function loadRecords() {
-  if (!orderCode.value || loading.value) {
+  if (!guardCurrentPageAccess() || !orderCode.value || loading.value) {
     return;
   }
   try {
