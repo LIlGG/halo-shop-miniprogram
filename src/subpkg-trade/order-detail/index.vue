@@ -21,6 +21,7 @@ import {
 } from '@/helpers/order';
 import type { OrderResponse, OrderItemResponse, FulfillmentUcResponse } from '@halo-dev/api-client';
 import { formatImageUrlWithThumbnail } from '@/helpers/image';
+import { findShippingLabel } from '@/helpers/fulfillment';
 
 const orderCode = ref('');
 const { t } = useI18n();
@@ -78,20 +79,20 @@ const statusInfo = computed(() => {
 const orderRequiresShipping = computed(() => !!order.value && requiresShipping(order.value));
 
 /**
- * Latest logistics update
+ * Shipping label summary
  */
-const latestLogistics = computed(() => {
+const shippingSummary = computed(() => {
   if (!orderRequiresShipping.value || !fulfillments.value.length) {
     return null;
   }
-  const f = fulfillments.value[0];
-  const label = f.labels?.[0];
-  if (!label?.carrier && !label?.trackingNumber) {
+  const label = findShippingLabel(fulfillments.value);
+  if (!label) {
     return null;
   }
   return {
-    carrier: label?.carrier ?? t('order.status.express'),
-    trackingNumber: label?.trackingNumber ?? '',
+    carrier: label.carrier?.trim() || t('order.status.express'),
+    trackingNumber: label.trackingNumber ?? '',
+    shippedAt: label.shippedAt,
   };
 });
 
@@ -266,12 +267,13 @@ function onCopyOrderCode() {
     </view>
 
     <view
-      v-if="latestLogistics"
+      v-if="shippingSummary"
       class="mx-3 mt-3 bg-white rounded-2 p-4 shadow-card border border-solid border-brand/5"
     >
       <view
         class="flex gap-4 items-start pb-4"
         style="border-bottom: 1rpx solid rgba(238, 43, 43, 0.06)"
+        @tap="onViewLogistics"
       >
         <view class="shrink-0 flex items-center justify-center rounded-1.5 w-10 h-10 bg-brand/10">
           <TIcon name="secured" v-bind="{ size: '32rpx', color: ICON_COLOR.brand }" />
@@ -280,12 +282,14 @@ function onCopyOrderCode() {
           <text class="text-sm text-slate-950 font-medium leading-snug">
             {{
               $t('order.shippingProgress', {
-                carrier: latestLogistics.carrier,
-                trackingNumber: latestLogistics.trackingNumber,
+                carrier: shippingSummary.carrier,
+                trackingNumber: shippingSummary.trackingNumber,
               })
             }}
           </text>
-          <text class="text-xs text-slate-500">{{ formatDate(order.updatedAt) }}</text>
+          <text v-if="shippingSummary.shippedAt" class="text-xs text-slate-500">
+            {{ formatDate(shippingSummary.shippedAt) }}
+          </text>
         </view>
         <TIcon name="chevron-right" v-bind="{ size: '24rpx', color: ICON_COLOR.muted }" />
       </view>
