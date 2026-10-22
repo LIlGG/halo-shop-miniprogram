@@ -9,6 +9,12 @@ import { cartApi } from '@/api/modules/cart';
 import { productApi } from '@/api/modules/product';
 import { useAppConfig } from '@/config';
 import { getSpecText } from '@/helpers/order';
+import {
+  clampQuantity,
+  getCartQuantityLimit,
+  getQuantityLimit,
+  isQuantityAllowed,
+} from '@/helpers/quantity';
 import type {
   CartItemResponse,
   ProductResponse,
@@ -51,6 +57,20 @@ const {
   reset: resetCartLoaded,
 } = useInitialLoading(loading, { delay: 120, minDuration: 180 });
 const isEditing = ref(false);
+const updatingIds = ref(new Set<number>());
+const skuSubmitting = ref(false);
+const cartQuantityMaximum = Math.min(maxCartItems, 999);
+
+function itemQuantityLimit(item: CartItemResponse) {
+  return getCartQuantityLimit(item, cartQuantityMaximum);
+}
+
+function showQuantityLimit(maximum: number) {
+  uni.showToast({
+    title: maximum < 1 ? t('sku.unavailable') : t('sku.quantityLimit', { max: maximum }),
+    icon: 'none',
+  });
+}
 
 const selectedIds = ref<Set<number>>(new Set());
 
@@ -184,20 +204,31 @@ function toggleSelect(id: number) {
 }
 
 async function changeQuantity(item: CartItemResponse, delta: number) {
-  const newQty = (item.quantity ?? 1) + delta;
-  if (newQty < 1) {
+  if (item.id == null || updatingIds.value.has(item.id) || skuSubmitting.value) {
     return;
   }
-  if (newQty > maxCartItems) {
-    uni.showToast({ title: t('cart.maxQuantity', { max: maxCartItems }), icon: 'none' });
+  const maximum = itemQuantityLimit(item);
+  const requested = (item.quantity ?? 1) + delta;
+  if (requested < 1) {
     return;
   }
+  const newQty = delta < 0 ? clampQuantity(requested, maximum) : requested;
+  if (!isQuantityAllowed(newQty, maximum)) {
+    showQuantityLimit(maximum);
+    return;
+  }
+  updatingIds.value.add(item.id);
   try {
-    await sendRequest(cartApi.updateCartItem(item.id!, newQty));
-    item.quantity = newQty;
-    cartStore.updateQuantity(item.id!, newQty);
+    const updated = await sendRequest(cartApi.updateCartItem(item.id, newQty));
+    if (!updated) {
+      throw new Error('Missing cart item response');
+    }
+    Object.assign(item, updated);
+    syncCartStore(cartItems.value);
   } catch {
     uni.showToast({ title: t('cart.operationFailed'), icon: 'none' });
+  } finally {
+    updatingIds.value.delete(item.id);
   }
 }
 
@@ -246,8 +277,18 @@ async function removeSelected() {
 }
 
 function goToCheckout() {
+  if (updatingIds.value.size || skuSubmitting.value) {
+    return;
+  }
   if (!selectedItems.value.length) {
     uni.showToast({ title: t('cart.selectItems'), icon: 'none' });
+    return;
+  }
+  const invalidItem = selectedItems.value.find(
+    (item) => !isQuantityAllowed(item.quantity ?? 1, getCartQuantityLimit(item, 999)),
+  );
+  if (invalidItem) {
+    showQuantityLimit(getCartQuantityLimit(invalidItem, 999));
     return;
   }
   const checkoutItems = selectedItems.value
@@ -307,7 +348,14 @@ const skuQuantity = ref(1);
 const skuSelectedVariant = computed(() => {
   const variants = skuProduct.value?.productVariants;
   if (!variants?.length) {
-    return skuTargetItem.value?.productVariant ?? null;
+    const item = skuTargetItem.value;
+    return item?.productVariant
+      ? {
+          ...item.productVariant,
+          maxPerOrder: item.maxPerOrder ?? item.productVariant.maxPerOrder,
+          maxPerUser: item.maxPerUser ?? item.productVariant.maxPerUser,
+        }
+      : null;
   }
   return (
     variants.find((v) => {
@@ -320,6 +368,17 @@ const skuSelectedVariant = computed(() => {
     null
   );
 });
+
+const skuQuantityLimit = computed(() =>
+  getQuantityLimit(skuSelectedVariant.value, cartQuantityMaximum),
+);
+watch(
+  skuQuantityLimit,
+  (maximum) => {
+    skuQuantity.value = clampQuantity(skuQuantity.value, maximum);
+  },
+  { flush: 'sync' },
+);
 
 const skuDisplayPrice = computed(() => {
   const price = skuSelectedVariant.value?.price;
@@ -338,8 +397,11 @@ const skuSelectedText = computed(() => {
 });
 
 async function openSkuSelector(item: CartItemResponse) {
+  if (skuSubmitting.value || (item.id != null && updatingIds.value.has(item.id))) {
+    return;
+  }
   skuTargetItem.value = item;
-  skuQuantity.value = item.quantity ?? 1;
+  skuQuantity.value = clampQuantity(item.quantity ?? 1, itemQuantityLimit(item));
 
   /**
    * Initialize selected specs from the current cart item variant
@@ -383,8 +445,6 @@ async function openSkuSelector(item: CartItemResponse) {
   }
 }
 
-const skuSubmitting = ref(false);
-
 async function confirmSkuChange() {
   if (skuSubmitting.value) {
     return;
@@ -396,21 +456,55 @@ async function confirmSkuChange() {
 
   const newVariant = skuSelectedVariant.value;
   const newQty = skuQuantity.value;
+  if (!newVariant?.id || !isQuantityAllowed(newQty, skuQuantityLimit.value)) {
+    showQuantityLimit(skuQuantityLimit.value);
+    return;
+  }
+  const oldVariantId = item.productVariantId ?? item.productVariant?.id;
+  const variantChanged = newVariant.id !== oldVariantId;
+  if (variantChanged) {
+    const existing = cartItems.value.find(
+      (candidate) =>
+        candidate.id !== item.id &&
+        (candidate.productVariantId ?? candidate.productVariant?.id) === newVariant.id,
+    );
+    const mergedQuantity = newQty + (existing?.quantity ?? 0);
+    if (!isQuantityAllowed(mergedQuantity, skuQuantityLimit.value)) {
+      showQuantityLimit(skuQuantityLimit.value);
+      return;
+    }
+  }
 
   skuSubmitting.value = true;
+  let replacementAdded = false;
   try {
-    // If the variant changes, remove the old item before adding the new one
-    if (newVariant?.id && newVariant.id !== item.productVariant?.id) {
+    if (variantChanged) {
+      // Adding can be rejected by server purchase limits. Keep the original item until it succeeds.
+      const added = await sendRequest(
+        cartApi.addCartItem({ productVariantId: newVariant.id, quantity: newQty }),
+      );
+      if (!added) {
+        throw new Error('Missing added cart item response');
+      }
+      replacementAdded = true;
       await sendRequest(cartApi.removeCartItem(item.id!));
-      await sendRequest(cartApi.addCartItem({ productVariantId: newVariant.id, quantity: newQty }));
       await loadCart();
     } else if (newQty !== item.quantity) {
-      await sendRequest(cartApi.updateCartItem(item.id!, newQty));
-      item.quantity = newQty;
+      const updated = await sendRequest(cartApi.updateCartItem(item.id!, newQty));
+      if (!updated) {
+        throw new Error('Missing cart item response');
+      }
+      Object.assign(item, updated);
+      syncCartStore(cartItems.value);
     }
     skuVisible.value = false;
     uni.showToast({ title: t('cart.updated'), icon: 'success' });
   } catch {
+    await loadCart();
+    if (replacementAdded) {
+      // Show the actual cart after a partial replacement instead of offering to add it again.
+      skuVisible.value = false;
+    }
     uni.showToast({ title: t('cart.updateFailed'), icon: 'none' });
   } finally {
     skuSubmitting.value = false;
@@ -518,6 +612,26 @@ function goToProduct(product: ProductResponse | undefined) {
                   >
                     {{ item.product?.title }}
                   </text>
+                  <text
+                    v-if="(item.maxPerOrder ?? item.productVariant?.maxPerOrder) != null"
+                    class="text-slate-500 text-xs"
+                  >
+                    {{
+                      t('sku.perOrderLimit', {
+                        count: item.maxPerOrder ?? item.productVariant?.maxPerOrder,
+                      })
+                    }}
+                  </text>
+                  <text
+                    v-if="(item.maxPerUser ?? item.productVariant?.maxPerUser) != null"
+                    class="text-slate-500 text-xs"
+                  >
+                    {{
+                      t('sku.perUserLimit', {
+                        count: item.maxPerUser ?? item.productVariant?.maxPerUser,
+                      })
+                    }}
+                  </text>
                   <view
                     v-if="getItemSpecText(item)"
                     class="flex items-center bg-slate-100 rounded-0.5 px-1.5 py-0.5 self-start gap-1 max-w-36"
@@ -545,7 +659,9 @@ function goToProduct(product: ProductResponse | undefined) {
                   <view class="flex items-center bg-slate-100 rounded-1 overflow-hidden">
                     <view
                       class="w-7 h-7 flex items-center justify-center"
-                      :class="(item.quantity ?? 1) <= 1 ? 'opacity-30' : ''"
+                      :class="
+                        (item.quantity ?? 1) <= 1 || updatingIds.has(item.id!) ? 'opacity-30' : ''
+                      "
                       @tap.stop="changeQuantity(item, -1)"
                     >
                       <view class="w-3 h-0.5 bg-slate-600 rounded-full" />
@@ -557,6 +673,11 @@ function goToProduct(product: ProductResponse | undefined) {
                     </view>
                     <view
                       class="w-7 h-7 flex items-center justify-center"
+                      :class="
+                        (item.quantity ?? 1) >= itemQuantityLimit(item) || updatingIds.has(item.id!)
+                          ? 'opacity-30'
+                          : ''
+                      "
                       @tap.stop="changeQuantity(item, 1)"
                     >
                       <view class="relative w-3 h-3">
@@ -648,6 +769,10 @@ function goToProduct(product: ProductResponse | undefined) {
       :fallback-cover-image="skuTargetItem?.product?.coverImageUrl ?? ''"
       :price="skuDisplayPrice"
       :stock="skuSelectedVariant?.stock ?? -1"
+      :track-inventory="skuSelectedVariant?.trackInventory ?? false"
+      :max-per-order="skuSelectedVariant?.maxPerOrder"
+      :max-per-user="skuSelectedVariant?.maxPerUser"
+      :max-quantity="cartQuantityMaximum"
       :selected-text="skuSelectedText"
       :spec-definition="skuSpecDefinition"
       :selected-specs="skuSelectedSpecs"
@@ -657,7 +782,7 @@ function goToProduct(product: ProductResponse | undefined) {
     >
       <view
         class="bg-brand rounded-full py-3.5 flex items-center justify-center"
-        :class="skuSubmitting ? 'opacity-60' : ''"
+        :class="skuSubmitting || skuQuantityLimit < 1 ? 'opacity-60' : ''"
         @tap="confirmSkuChange"
       >
         <text class="text-white text-base font-bold">{{
