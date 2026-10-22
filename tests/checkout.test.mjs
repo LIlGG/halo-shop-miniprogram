@@ -352,8 +352,11 @@ test('explicit creation rejection refreshes pricing before permitting a retry', 
   assert.equal(h.checkout.completedOrder.value.orderCode, 'retried-order');
 });
 
-function confirmationPage(checkoutHarness, { redirectThrows = false } = {}) {
-  const calls = { navigations: [], redirects: [], toasts: [] };
+function confirmationPage(
+  checkoutHarness,
+  { redirectThrows = false, pageDepth = 1, backFails = false } = {},
+) {
+  const calls = { navigations: [], redirects: [], toasts: [], backs: 0 };
   let show;
   const source = readFileSync(
     new URL('../src/subpkg-trade/confirm/index.vue', import.meta.url),
@@ -385,7 +388,7 @@ function confirmationPage(checkoutHarness, { redirectThrows = false } = {}) {
   };
   runInNewContext(
     ts.transpileModule(
-      `${source}\nmodule.exports = { handleSubmit, goSelectAddress, loading, hasInitialized };`,
+      `${source}\nmodule.exports = { handleSubmit, goSelectAddress, goModifyCheckout, pricingFailureText, loading, hasInitialized };`,
       {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
       },
@@ -402,8 +405,14 @@ function confirmationPage(checkoutHarness, { redirectThrows = false } = {}) {
             throw new Error('Navigation failed');
           }
         },
+        navigateBack: (options) => {
+          calls.backs++;
+          if (backFails) {
+            options.fail();
+          }
+        },
       },
-      getCurrentPages: () => [{}],
+      getCurrentPages: () => Array.from({ length: pageDepth }).fill({}),
     },
   );
   module.exports.loading.value = false;
@@ -467,6 +476,7 @@ test('uncertain results offer order review without repricing or submitting again
 });
 
 function requestHarness({ initialize, refresh } = {}) {
+  const toasts = [];
   const store = {
     credential: 'alice-token',
     profile: { metadata: { name: 'alice' } },
@@ -479,7 +489,7 @@ function requestHarness({ initialize, refresh } = {}) {
     '@/config': { useAppConfig: () => ({ halo: {} }) },
     '@/store': { useUserStore: () => store },
     '@/utils/date': { isTimeExpired: () => true },
-    '@/utils/error': { showErrorToast() {} },
+    '@/utils/error': { showErrorToast: (message) => toasts.push(message) },
     '@/services/session': {
       ensureSessionInitialized: async () => initialize?.(store),
       refreshSession: async () => refresh?.(store),
@@ -488,7 +498,7 @@ function requestHarness({ initialize, refresh } = {}) {
     '@/locales': { translate: (key) => key },
     '@/helpers/checkout': helper,
   }).alovaInst;
-  return { store, options };
+  return { store, options, toasts };
 }
 
 test('transport rechecks checkout ownership after session initialization and auth refresh', async () => {
@@ -673,4 +683,149 @@ test('late authentication failures from the previous checkout account preserve t
   }
   assert.equal(refreshes, 0);
   assert.equal(cleared, 0);
+});
+
+const maxPerUserProblem = {
+  detail: 'ID 为 79 的产品规格每个客户累计最多购买 5 件。',
+  instance: 'http://localhost:8091/apis/mp.api.ecommerce.halo.run/v1alpha1/checkout/-/prepare',
+  status: 400,
+  title: '请求参数有误',
+  requestId: '84ad6719-695',
+  timestamp: '2026-10-22T09:38:21.640731Z',
+};
+
+test('a native prepare business 400 stays readable and blocks submission until a valid quote', async (t) => {
+  const transport = requestHarness();
+  const method = { meta: { checkoutOwner: 'alice' }, config: {} };
+  let rejected = true;
+  const h = checkoutHarness({
+    prepare: async () => {
+      if (rejected) {
+        return transport.options.responded.onSuccess(
+          { statusCode: 400, data: maxPerUserProblem },
+          method,
+        );
+      }
+      return quote('after-edit', 0);
+    },
+  });
+  t.after(() => h.scope.stop());
+  assert.equal(await h.checkout.initialize(payload), false);
+  const page = confirmationPage(h);
+  assert.equal(h.checkout.context.value, null);
+  assert.equal(h.checkout.failed.value, true);
+  assert.equal(h.checkout.verified.value, false);
+  assert.equal(page.page.pricingFailureText.value, maxPerUserProblem.detail);
+  await Promise.resolve();
+  assert.equal(page.page.pricingFailureText.value, maxPerUserProblem.detail);
+  await page.page.handleSubmit();
+  assert.equal(h.calls.submissions.length, 0);
+  assert.deepEqual(page.calls.toasts, []);
+  assert.deepEqual(transport.toasts, []);
+  rejected = false;
+  assert.equal(await h.checkout.refresh(), true);
+  assert.equal(h.checkout.failureDetail.value, null);
+  assert.equal(h.checkout.failed.value, false);
+  assert.equal(h.checkout.verified.value, true);
+  assert.equal(h.checkout.context.value.calculateResult.payableAmount, 0);
+});
+
+test('checkout business reasons never come from network errors, internal 5xx or malformed payloads', async (t) => {
+  for (const error of [
+    new Error('Internal connection string and credentials'),
+    { ...maxPerUserProblem, status: 503, detail: 'org.postgresql.Driver internal failure' },
+    { ...maxPerUserProblem, status: 401 },
+    { ...maxPerUserProblem, status: 403 },
+    { status: 400, message: 'Internal exception message' },
+    { ...maxPerUserProblem, detail: { password: 'do not show' } },
+    { ...maxPerUserProblem, detail: '   ' },
+  ]) {
+    const h = checkoutHarness({
+      prepare: async () => {
+        throw error;
+      },
+    });
+    t.after(() => h.scope.stop());
+    await h.checkout.initialize(payload);
+    assert.equal(h.checkout.failureDetail.value, null);
+    assert.equal(confirmationPage(h).page.pricingFailureText.value, 'checkout.pricingFailed');
+    assert.equal(h.checkout.verified.value, false);
+  }
+});
+
+test('an older rejected quote cannot overwrite a later successful quote with its business reason', async (t) => {
+  const late = deferred();
+  let requests = 0;
+  const h = checkoutHarness({
+    prepare: async () => (++requests === 2 ? late.promise : quote(`quote-${requests}`)),
+  });
+  t.after(() => h.scope.stop());
+  await h.checkout.initialize(payload);
+  const old = h.checkout.selectAddress({ id: 2 });
+  await h.checkout.selectAddress({ id: 3 });
+  late.reject(maxPerUserProblem);
+  await old;
+  assert.equal(h.checkout.context.value.id, 'quote-3');
+  assert.equal(h.checkout.verified.value, true);
+  assert.equal(h.checkout.failed.value, false);
+  assert.equal(h.checkout.failureDetail.value, null);
+});
+
+test('account changes clear existing business reasons and ignore another account late rejection', async (t) => {
+  const late = deferred();
+  let requests = 0;
+  const h = checkoutHarness({
+    prepare: async () => {
+      if (++requests === 1) {
+        throw maxPerUserProblem;
+      }
+      return late.promise;
+    },
+  });
+  t.after(() => h.scope.stop());
+  await h.checkout.initialize(payload);
+  assert.equal(h.checkout.failureDetail.value, maxPerUserProblem.detail);
+  const pending = h.checkout.refresh();
+  assert.equal(h.checkout.failureDetail.value, null);
+  h.store.profile = { metadata: { name: 'bob' } };
+  late.reject(maxPerUserProblem);
+  await pending;
+  assert.equal(h.checkout.accountChanged.value, true);
+  assert.equal(h.checkout.failed.value, false);
+  assert.equal(h.checkout.failureDetail.value, null);
+});
+
+test('checkout HTTP 5xx never toast backend detail even if its body falsely claims a business 400', async () => {
+  const h = requestHarness();
+  const method = { meta: { checkoutOwner: 'alice' }, config: {} };
+  await assert.rejects(
+    h.options.responded.onSuccess(
+      { statusCode: 503, data: { ...maxPerUserProblem, detail: 'Internal SQL credentials' } },
+      method,
+    ),
+    (error) => error.status === 503 && helper.getCheckoutBusinessDetail(error) === null,
+  );
+  assert.deepEqual(h.toasts, []);
+  await assert.rejects(h.options.responded.onError(new Error('Private network diagnostics')));
+  assert.deepEqual(h.toasts, ['common.networkError']);
+});
+
+test('a failed checkout can return to its previous editor with a cart fallback', async (t) => {
+  const h = checkoutHarness();
+  t.after(() => h.scope.stop());
+  for (const options of [{ pageDepth: 2 }, { pageDepth: 1 }, { pageDepth: 2, backFails: true }]) {
+    const page = confirmationPage(h, options);
+    page.page.goModifyCheckout();
+    assert.equal(page.calls.backs, options.pageDepth > 1 ? 1 : 0);
+    assert.deepEqual(
+      page.calls.navigations,
+      options.pageDepth === 1 || options.backFails ? ['/pages/cart/index'] : [],
+    );
+  }
+  await h.checkout.initialize(payload);
+  await h.checkout.submit('');
+  const page = confirmationPage(h, { pageDepth: 2 });
+  page.page.goModifyCheckout();
+  assert.equal(page.calls.backs, 0);
+  assert.deepEqual(page.calls.navigations, []);
 });

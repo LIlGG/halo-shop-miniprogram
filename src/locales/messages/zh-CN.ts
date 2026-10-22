@@ -105,6 +105,7 @@ const zhCN = {
   'checkout.emptyItems': '结算商品为空',
   'checkout.submitMissingOrderCode': '提交成功，但未获取订单号',
   'checkout.pricingFailed': '更新结算信息失败，请重试',
+  'checkout.modifyItems': '返回修改',
   'checkout.accountChanged': '账号已变更，请重新结算',
   'checkout.returnCart': '返回购物车',
   'checkout.submitUncertain': '订单可能已创建，请先查看订单',

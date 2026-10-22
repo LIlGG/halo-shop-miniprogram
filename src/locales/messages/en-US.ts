@@ -105,6 +105,7 @@ const enUS = {
   'checkout.emptyItems': 'No items to checkout',
   'checkout.submitMissingOrderCode': 'Submitted, but order code was not returned',
   'checkout.pricingFailed': 'Failed to update checkout. Please retry.',
+  'checkout.modifyItems': 'Back to edit',
   'checkout.accountChanged': 'Account changed. Please start checkout again.',
   'checkout.returnCart': 'Return to cart',
   'checkout.submitUncertain': 'Your order may have been created. Please check your orders.',

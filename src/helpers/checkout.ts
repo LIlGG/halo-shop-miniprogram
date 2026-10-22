@@ -17,6 +17,21 @@ export class CheckoutSubmissionUncertainError extends Error {
   }
 }
 
+/** Only a structured client rejection can provide a user-facing business reason. */
+export function getCheckoutBusinessDetail(error: unknown): string | null {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    !('status' in error) ||
+    error.status !== 400 ||
+    !('detail' in error) ||
+    typeof error.detail !== 'string'
+  ) {
+    return null;
+  }
+  return error.detail.trim() || null;
+}
+
 export interface CheckoutRequest {
   path: string;
   data: PrepareCheckoutRequest | MpCheckoutSubmitRequest;

@@ -202,7 +202,8 @@ async function resolveResponse(response: ResponseLike, method: RequestMethodLike
     return handleForbiddenResponse(response, problem);
   }
 
-  if (method.meta?.checkoutOwner && statusCode === 404) {
+  if (method.meta?.checkoutOwner) {
+    // The confirmation page owns persistent error feedback; never toast internal 5xx detail.
     return rejectProblem(problem);
   }
   return handleUnexpectedStatus(problem, statusCode);

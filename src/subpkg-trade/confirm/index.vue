@@ -36,6 +36,7 @@ const {
   syncing: syncingContext,
   verified: pricingVerified,
   failed: pricingFailed,
+  failureDetail: pricingFailureDetail,
   submitting,
   uncertain: submissionUncertain,
   completedOrder,
@@ -50,6 +51,9 @@ const {
   submit,
 } = useCheckout();
 const contextAddress = computed(() => context.value?.userAddress);
+const pricingFailureText = computed(
+  () => pricingFailureDetail.value ?? t('checkout.pricingFailed'),
+);
 
 function parsePositiveId(value: unknown) {
   const id = Number(value);
@@ -207,6 +211,17 @@ function getItemSpecText(item: CheckoutItemResponse): string {
   return getSpecText(item.productVariant?.specValues);
 }
 
+function goModifyCheckout() {
+  if (checkoutLocked.value) {
+    return;
+  }
+  if (getCurrentPages().length > 1) {
+    uni.navigateBack({ fail: () => navigateToPage('/pages/cart/index') });
+    return;
+  }
+  navigateToPage('/pages/cart/index');
+}
+
 async function handleSubmit() {
   if (accountChanged.value) {
     navigateToPage('/pages/cart/index');
@@ -220,6 +235,9 @@ async function handleSubmit() {
   }
   if (submissionUncertain.value) {
     navigateToPage('/subpkg-trade/order-list/index');
+    return;
+  }
+  if (pricingFailed.value) {
     return;
   }
   try {
@@ -253,7 +271,7 @@ async function handleSubmit() {
     class="flex flex-col border-0 border-t-1 border-solid border-gray-100 bg-bg-page min-h-screen"
   >
     <scroll-view scroll-y class="flex-1 pb-30">
-      <view class="bg-white">
+      <view v-if="context" class="bg-white">
         <view
           class="flex items-center justify-between px-4"
           :class="isShippingRequired ? 'py-2 min-h-22' : 'py-3 min-h-14'"
@@ -309,7 +327,7 @@ async function handleSubmit() {
         <view class="mx-4 border-0 border-b border-dashed border-slate-200" />
       </view>
 
-      <view class="bg-white mt-2 px-4 py-4 flex flex-col gap-4">
+      <view v-if="items.length" class="bg-white mt-2 px-4 py-4 flex flex-col gap-4">
         <view v-for="(item, idx) in items" :key="idx" class="flex gap-3 items-start">
           <view class="shrink-0 rounded-1 overflow-hidden bg-slate-100 w-24 h-24">
             <image
@@ -344,18 +362,19 @@ async function handleSubmit() {
         </view>
       </view>
 
-      <AppLoadError
-        v-if="pricingFailed && !checkoutLocked"
-        :text="t('checkout.pricingFailed')"
-        @retry="refreshCheckoutContext"
-      />
+      <view v-if="pricingFailed && !checkoutLocked">
+        <AppLoadError :text="pricingFailureText" @retry="refreshCheckoutContext" />
+        <view class="flex justify-center pb-6" @tap="goModifyCheckout">
+          <text class="text-brand text-sm">{{ $t('checkout.modifyItems') }}</text>
+        </view>
+      </view>
       <view
         v-if="submissionUncertain || accountChanged"
         class="bg-white mt-2 px-4 py-3 text-xs text-slate-500 leading-relaxed"
       >
         {{ t(accountChanged ? 'checkout.accountChanged' : 'checkout.submitUncertain') }}
       </view>
-      <view class="bg-white mt-2 px-4">
+      <view v-if="context" class="bg-white mt-2 px-4">
         <view class="flex items-center justify-between py-4">
           <text class="text-slate-950 text-sm">{{ $t('checkout.productAmount') }}</text>
           <text class="text-slate-950 text-sm">
@@ -405,7 +424,7 @@ async function handleSubmit() {
         </view>
       </view>
 
-      <view class="bg-white mt-2 px-4 py-4 flex items-center justify-end gap-2">
+      <view v-if="context" class="bg-white mt-2 px-4 py-4 flex items-center justify-end gap-2">
         <text class="text-slate-500 text-xs">{{
           $t('checkout.totalItems', { count: totalQuantity })
         }}</text>
@@ -423,9 +442,9 @@ async function handleSubmit() {
     >
       <view class="flex flex-col gap-0.5">
         <view class="flex items-baseline gap-0.5">
-          <text class="text-brand text-sm font-bold">{{ currencySymbol }}</text>
+          <text v-if="context" class="text-brand text-sm font-bold">{{ currencySymbol }}</text>
           <text class="text-brand text-6 font-bold">
-            {{ formatPrice(payableAmount) }}
+            {{ context ? formatPrice(payableAmount) : '--' }}
           </text>
         </view>
         <text v-if="totalDiscountAmount > 0" class="text-slate-400 text-2.5">

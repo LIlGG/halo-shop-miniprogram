@@ -9,7 +9,11 @@ import { checkoutApi } from '@/api/modules/checkout';
 import { addressApi } from '@/api/modules/address';
 import { sendRequest } from '@/hooks/useRequest';
 import { useUserStore } from '@/store';
-import { CheckoutAccountChangedError, CheckoutSubmissionUncertainError } from '@/helpers/checkout';
+import {
+  CheckoutAccountChangedError,
+  CheckoutSubmissionUncertainError,
+  getCheckoutBusinessDetail,
+} from '@/helpers/checkout';
 
 export class CheckoutNotReadyError extends Error {
   constructor(public reason: 'syncing' | 'selectAddress' | 'emptyItems') {
@@ -26,6 +30,7 @@ export function useCheckout() {
   const syncing = shallowRef(false);
   const verified = shallowRef(false);
   const failed = shallowRef(false);
+  const failureDetail = shallowRef<string | null>(null);
   const submitting = shallowRef(false);
   const uncertain = shallowRef(false);
   const completedOrder = shallowRef<{ orderCode: string; paymentStatus?: string } | null>(null);
@@ -52,6 +57,8 @@ export function useCheckout() {
       selectedAddress.value = null;
       addresses = [];
       verified.value = false;
+      failed.value = false;
+      failureDetail.value = null;
       syncing.value = false;
       completedOrder.value = null;
       uncertain.value = false;
@@ -67,6 +74,7 @@ export function useCheckout() {
     syncing.value = true;
     verified.value = false;
     failed.value = false;
+    failureDetail.value = null;
     try {
       if (reloadAddresses) {
         // Address-list availability does not decide whether the native checkout can proceed.
@@ -93,9 +101,10 @@ export function useCheckout() {
         addresses.find((address) => address.id === result.selectedAddressId) ?? null;
       verified.value = true;
       return true;
-    } catch {
+    } catch (error) {
       if (token === generation && isOwnerCurrent()) {
         failed.value = true;
+        failureDetail.value = getCheckoutBusinessDetail(error);
       }
       return false;
     } finally {
@@ -220,6 +229,7 @@ export function useCheckout() {
     syncing: shallowReadonly(syncing),
     verified: shallowReadonly(verified),
     failed: shallowReadonly(failed),
+    failureDetail: shallowReadonly(failureDetail),
     submitting: shallowReadonly(submitting),
     uncertain: shallowReadonly(uncertain),
     completedOrder: shallowReadonly(completedOrder),
