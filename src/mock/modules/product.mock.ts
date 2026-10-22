@@ -30,7 +30,9 @@ function generateVariant(
 ): ProductVariantResponse {
   // Price unit: yuan (floating point, consistent with the frontend)
   const pricingType =
-    productId % 10 === 0 || (productId % 10 === 1 && index === 1) ? 'INQUIRY' : 'FIXED';
+    productId % 10 === 0 || (productId !== 1 && productId % 10 === 1 && index === 1)
+      ? 'INQUIRY'
+      : 'FIXED';
   const price =
     pricingType === 'INQUIRY' ? 0 : Number(faker.commerce.price({ min: 19.9, max: 999 }));
   // Mock some variants as unavailable: about 20% have a non-PUBLISHED status, and about 15% have stock 0
