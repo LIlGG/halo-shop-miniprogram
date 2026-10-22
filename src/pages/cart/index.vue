@@ -4,6 +4,7 @@ import { onShow } from '@dcloudio/uni-app';
 import { useI18n } from 'vue-i18n';
 import AppLoading from '@/components/common/AppLoading.vue';
 import AppEmpty from '@/components/common/AppEmpty.vue';
+import AppLoadError from '@/components/common/AppLoadError.vue';
 import LoginPanel from '@/components/business/LoginPanel.vue';
 import { cartApi } from '@/api/modules/cart';
 import { productApi } from '@/api/modules/product';
@@ -59,6 +60,8 @@ const {
 const isEditing = ref(false);
 const updatingIds = ref(new Set<number>());
 const skuSubmitting = ref(false);
+const cartRefreshRequired = ref(false);
+let cartRequestVersion = 0;
 const cartQuantityMaximum = Math.min(maxCartItems, 999);
 
 function itemQuantityLimit(item: CartItemResponse) {
@@ -146,6 +149,8 @@ function syncCartStore(items: CartItemResponse[]) {
 }
 
 function resetCartView() {
+  cartRequestVersion++;
+  cartRefreshRequired.value = false;
   cartItems.value = [];
   cartStore.clearAll();
   selectedIds.value = new Set();
@@ -156,14 +161,26 @@ function resetCartView() {
 }
 
 async function loadCart() {
+  const version = ++cartRequestVersion;
   try {
     const data = await runCartQuery({});
-    cartItems.value = data ?? [];
+    if (version !== cartRequestVersion) {
+      return false;
+    }
+    if (!Array.isArray(data)) {
+      throw new TypeError('Missing cart list response');
+    }
+    cartItems.value = data;
     selectedIds.value = new Set(cartItems.value.map((i) => i.id!));
     syncCartStore(cartItems.value);
+    cartRefreshRequired.value = false;
+    return true;
   } catch {
+    return false;
   } finally {
-    markCartLoaded();
+    if (version === cartRequestVersion) {
+      markCartLoaded();
+    }
   }
 }
 
@@ -204,7 +221,12 @@ function toggleSelect(id: number) {
 }
 
 async function changeQuantity(item: CartItemResponse, delta: number) {
-  if (item.id == null || updatingIds.value.has(item.id) || skuSubmitting.value) {
+  if (
+    item.id == null ||
+    updatingIds.value.has(item.id) ||
+    skuSubmitting.value ||
+    cartRefreshRequired.value
+  ) {
     return;
   }
   const maximum = itemQuantityLimit(item);
@@ -223,8 +245,7 @@ async function changeQuantity(item: CartItemResponse, delta: number) {
     if (!updated) {
       throw new Error('Missing cart item response');
     }
-    Object.assign(item, updated);
-    syncCartStore(cartItems.value);
+    applyCartItemResponse(item, updated);
   } catch {
     uni.showToast({ title: t('cart.operationFailed'), icon: 'none' });
   } finally {
@@ -277,7 +298,7 @@ async function removeSelected() {
 }
 
 function goToCheckout() {
-  if (updatingIds.value.size || skuSubmitting.value) {
+  if (updatingIds.value.size || skuSubmitting.value || cartRefreshRequired.value) {
     return;
   }
   if (!selectedItems.value.length) {
@@ -334,6 +355,16 @@ const skuVisible = ref(false);
 const skuTargetItem = ref<CartItemResponse | null>(null);
 const skuProduct = ref<ProductResponse | null>(null);
 const skuLoadingId = ref<number | null>(null);
+
+function applyCartItemResponse(item: CartItemResponse, updated: CartItemResponse) {
+  Object.assign(item, updated, {
+    maxPerOrder: updated.maxPerOrder,
+    maxPerUser: updated.maxPerUser,
+  });
+  // The full product cache may still carry purchase limits the server has just removed.
+  skuProduct.value = null;
+  syncCartStore(cartItems.value);
+}
 
 const skuSpecDefinition = computed<SpecDefinitionPayload[]>(
   () => skuProduct.value?.specDefinition ?? [],
@@ -397,7 +428,11 @@ const skuSelectedText = computed(() => {
 });
 
 async function openSkuSelector(item: CartItemResponse) {
-  if (skuSubmitting.value || (item.id != null && updatingIds.value.has(item.id))) {
+  if (
+    skuSubmitting.value ||
+    cartRefreshRequired.value ||
+    (item.id != null && updatingIds.value.has(item.id))
+  ) {
     return;
   }
   skuTargetItem.value = item;
@@ -446,7 +481,7 @@ async function openSkuSelector(item: CartItemResponse) {
 }
 
 async function confirmSkuChange() {
-  if (skuSubmitting.value) {
+  if (skuSubmitting.value || cartRefreshRequired.value || !skuVisible.value) {
     return;
   }
   const item = skuTargetItem.value;
@@ -476,35 +511,40 @@ async function confirmSkuChange() {
   }
 
   skuSubmitting.value = true;
-  let replacementAdded = false;
+  let replacementStarted = false;
   try {
     if (variantChanged) {
-      // Adding can be rejected by server purchase limits. Keep the original item until it succeeds.
+      // Once sent, a failed response cannot prove whether the server has accumulated the new SKU.
+      replacementStarted = true;
+      cartRequestVersion++;
       const added = await sendRequest(
         cartApi.addCartItem({ productVariantId: newVariant.id, quantity: newQty }),
       );
       if (!added) {
         throw new Error('Missing added cart item response');
       }
-      replacementAdded = true;
       await sendRequest(cartApi.removeCartItem(item.id!));
-      await loadCart();
+      cartRefreshRequired.value = true;
+      if (!(await loadCart())) {
+        skuVisible.value = false;
+        uni.showToast({ title: t('cart.updateFailed'), icon: 'none' });
+        return;
+      }
     } else if (newQty !== item.quantity) {
       const updated = await sendRequest(cartApi.updateCartItem(item.id!, newQty));
       if (!updated) {
         throw new Error('Missing cart item response');
       }
-      Object.assign(item, updated);
-      syncCartStore(cartItems.value);
+      applyCartItemResponse(item, updated);
     }
     skuVisible.value = false;
     uni.showToast({ title: t('cart.updated'), icon: 'success' });
   } catch {
-    await loadCart();
-    if (replacementAdded) {
-      // Show the actual cart after a partial replacement instead of offering to add it again.
+    if (replacementStarted) {
       skuVisible.value = false;
+      cartRefreshRequired.value = true;
     }
+    await loadCart();
     uni.showToast({ title: t('cart.updateFailed'), icon: 'none' });
   } finally {
     skuSubmitting.value = false;
@@ -541,8 +581,9 @@ function goToProduct(product: ProductResponse | undefined) {
       <view v-else-if="isInitialLoading" class="flex-1" />
 
       <template v-else>
+        <AppLoadError v-if="cartRefreshRequired" @retry="loadCart" />
         <AppEmpty
-          v-if="!cartItems.length"
+          v-else-if="!cartItems.length"
           :text="$t('cart.emptyTitle')"
           :subtext="$t('cart.emptySubtitle')"
           :cta-text="$t('cart.goShopping')"
@@ -699,7 +740,7 @@ function goToProduct(product: ProductResponse | undefined) {
     </view>
 
     <view
-      v-if="!showLoginPanel && cartItems.length"
+      v-if="!showLoginPanel && cartItems.length && !cartRefreshRequired"
       class="fixed left-0 right-0 z-20 bg-white border-t border-slate-100 flex items-center justify-between px-4 py-3"
       :style="`bottom: ${totalHeight + 5}px;`"
     >

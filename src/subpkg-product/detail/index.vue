@@ -105,13 +105,13 @@ const originalPrice = computed(() => {
  * Determine whether a variant is purchasable:
  * 1. It must exist in the productVariants list
  * 2. status must be PUBLISHED
- * 3. Tracked inventory and the per-order limit must allow at least one item
+ * 3. When inventory is tracked, stock must allow at least one item
  */
 function isVariantAvailable(variant: ProductVariantResponse): boolean {
   if (variant.status !== 'PUBLISHED') {
     return false;
   }
-  return getQuantityLimit(variant) >= 1;
+  return variant.trackInventory !== true || (variant.stock ?? 0) > 0;
 }
 
 /**

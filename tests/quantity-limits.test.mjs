@@ -205,7 +205,7 @@ function productHarness(variants = [variant()]) {
           navigateTo: (input) => calls.navigations.push(input.url),
         },
       },
-      'module.exports = { quantity, selectedSpecs, selectedVariant, quantityLimit, handleAddToCart, handleBuyNow };',
+      'module.exports = { quantity, selectedSpecs, selectedVariant, quantityLimit, isVariantAvailable, disabledSpecValues, handleAddToCart, handleBuyNow };',
     ),
   );
   return { page, calls, data, stop: () => scope.stop() };
@@ -252,7 +252,7 @@ test('switching to a lower-limit SKU clamps the quantity before buy-now navigati
   h.stop();
 });
 
-function cartHarness({ items = [], variants = [variant()], add, remove, update } = {}) {
+function cartHarness({ items = [], variants = [variant()], add, remove, update, getCart } = {}) {
   const cart = structuredClone(items);
   const calls = {
     adds: [],
@@ -266,7 +266,7 @@ function cartHarness({ items = [], variants = [variant()], add, remove, update }
   const api = {
     getCartItems: async () => {
       calls.loads++;
-      return structuredClone(cart);
+      return getCart ? getCart(cart) : structuredClone(cart);
     },
     addCartItem: async (payload) => {
       calls.adds.push(payload);
@@ -340,7 +340,7 @@ function cartHarness({ items = [], variants = [variant()], add, remove, update }
           navigateTo: (input) => calls.navigations.push(input.url),
         },
       },
-      'module.exports = { cartItems, selectedIds, changeQuantity, goToCheckout, openSkuSelector, confirmSkuChange, skuSelectedSpecs, skuQuantity, skuVisible };',
+      'module.exports = { cartItems, selectedIds, changeQuantity, goToCheckout, openSkuSelector, confirmSkuChange, skuSelectedSpecs, skuQuantity, skuVisible, cartRefreshRequired, loadCart };',
     ),
   );
   page.cartItems.value = structuredClone(cart);
@@ -579,4 +579,137 @@ test('stable Mock product and cart APIs expose the same SKU limits and reject me
     (error) => error.status === 400,
   );
   assert.equal(readCart()[0].quantity, 3);
+});
+
+test('a SKU add that commits before its response times out refreshes the cart and cannot be replayed from the old sheet', async () => {
+  const target = variant({ id: 11, maxPerOrder: 9, specValues: [{ name: 'Size', value: 'L' }] });
+  const h = cartHarness({
+    items: [
+      cartItem(),
+      cartItem({ id: 2, productVariantId: 11, quantity: 1, productVariant: target }),
+    ],
+    variants: [variant(), target],
+    add: async (payload, cart) => {
+      cart[1].quantity += payload.quantity;
+      throw new Error('Response timed out after server commit');
+    },
+  });
+  await h.page.openSkuSelector(h.page.cartItems.value[0]);
+  h.page.skuSelectedSpecs.value = { Size: 'L' };
+  await h.page.confirmSkuChange();
+  assert.equal(h.page.skuVisible.value, false);
+  assert.equal(h.page.cartRefreshRequired.value, false);
+  assert.equal(h.page.cartItems.value.find((item) => item.id === 2).quantity, 3);
+  await h.page.confirmSkuChange();
+  assert.equal(h.calls.adds.length, 1);
+  assert.equal(h.calls.removes.length, 0);
+  assert.equal(h.cart[1].quantity, 3);
+  h.stop();
+});
+
+test('a failed refresh after an uncertain SKU add locks quantity, SKU and checkout actions until a successful read', async () => {
+  let offline = true;
+  const target = variant({ id: 11, maxPerOrder: 9, specValues: [{ name: 'Size', value: 'L' }] });
+  const h = cartHarness({
+    items: [cartItem()],
+    variants: [variant(), target],
+    add: async (payload, cart) => {
+      cart.push(
+        cartItem({
+          id: 2,
+          productVariantId: 11,
+          productVariant: target,
+          quantity: payload.quantity,
+        }),
+      );
+      throw new Error('Response timed out after server commit');
+    },
+    getCart: async (cart) => {
+      if (offline) {
+        throw new Error('Offline');
+      }
+      return structuredClone(cart);
+    },
+  });
+  await h.page.openSkuSelector(h.page.cartItems.value[0]);
+  h.page.skuSelectedSpecs.value = { Size: 'L' };
+  await h.page.confirmSkuChange();
+  assert.equal(h.page.skuVisible.value, false);
+  assert.equal(h.page.cartRefreshRequired.value, true);
+  await h.page.changeQuantity(h.page.cartItems.value[0], 1);
+  await h.page.openSkuSelector(h.page.cartItems.value[0]);
+  await h.page.confirmSkuChange();
+  h.page.goToCheckout();
+  assert.equal(h.page.skuVisible.value, false);
+  assert.equal(h.calls.adds.length, 1);
+  assert.equal(h.calls.removes.length, 0);
+  assert.equal(h.calls.updates.length, 0);
+  assert.equal(h.calls.navigations.length, 0);
+  offline = false;
+  assert.equal(await h.page.loadCart(), true);
+  assert.equal(h.page.cartRefreshRequired.value, false);
+  assert.equal(h.page.cartItems.value.length, 2);
+  await h.page.changeQuantity(h.page.cartItems.value[0], 1);
+  assert.equal(h.calls.updates.length, 1);
+  h.page.goToCheckout();
+  assert.equal(h.calls.navigations.length, 1);
+  assert.equal(h.calls.adds.length, 1);
+  h.stop();
+});
+
+for (const fromSku of [false, true]) {
+  test(`a complete cart response that omits removed limits clears stale metadata after ${fromSku ? 'SKU confirmation' : 'row update'}`, async () => {
+    const original = cartItem({ maxPerOrder: 3, maxPerUser: 5 });
+    const h = cartHarness({
+      items: [original],
+      update: async (id, value, cart) => {
+        const fresh = {
+          ...cart[0],
+          quantity: value,
+          productVariant: { ...cart[0].productVariant },
+        };
+        delete fresh.maxPerOrder;
+        delete fresh.maxPerUser;
+        delete fresh.productVariant.maxPerOrder;
+        delete fresh.productVariant.maxPerUser;
+        cart[0] = fresh;
+        return structuredClone(fresh);
+      },
+    });
+    if (fromSku) {
+      await h.page.openSkuSelector(h.page.cartItems.value[0]);
+      h.page.skuQuantity.value = 3;
+      await h.page.confirmSkuChange();
+    } else {
+      await h.page.changeQuantity(h.page.cartItems.value[0], 1);
+    }
+    const item = h.page.cartItems.value[0];
+    assert.equal(item.maxPerOrder, undefined);
+    assert.equal(item.maxPerUser, undefined);
+    assert.equal(item.productVariant.maxPerOrder, undefined);
+    assert.equal(item.productVariant.maxPerUser, undefined);
+    await h.page.changeQuantity(item, 1);
+    assert.equal(h.calls.updates.at(-1).quantity, 4);
+    h.stop();
+  });
+}
+
+test('per-order limits do not hide an in-stock inquiry SKU from mixed-product spec selection', async () => {
+  const inquiry = variant({
+    id: 11,
+    pricingType: 'INQUIRY',
+    maxPerOrder: 0,
+    specValues: [{ name: 'Size', value: 'L' }],
+  });
+  const h = productHarness([variant({ pricingType: 'FIXED' }), inquiry]);
+  assert.equal(h.page.isVariantAvailable(inquiry), true);
+  assert.equal(h.page.disabledSpecValues.value.Size.has('L'), false);
+  h.page.selectedSpecs.value = { Size: 'L' };
+  assert.equal(h.page.selectedVariant.value.id, 11);
+  assert.equal(h.page.quantityLimit.value, 0);
+  await h.page.handleAddToCart();
+  h.page.handleBuyNow();
+  assert.equal(h.calls.adds.length, 0);
+  assert.equal(h.calls.navigations.length, 0);
+  h.stop();
 });
